@@ -7,12 +7,12 @@ require('dotenv').config();
 global.fetch = (...args) =>
   import('node-fetch').then(({ default: fetch }) => fetch(...args));
 const { Telegraf }   = require('telegraf');
-const { exec }      = require('child_process');
-const fs            = require('fs');
-const path          = require('path');
-const { OpenAI }    = require('openai');
-const pdfParse      = require('pdf-parse');
-const mammoth       = require('mammoth');
+const { exec }       = require('child_process');
+const fs             = require('fs');
+const path           = require('path');
+const { OpenAI }     = require('openai');
+const pdfParse       = require('pdf-parse');
+const mammoth        = require('mammoth');
 
 //─────────────────────────────────────────────────────────────────────────────
 // 3) Проверяем обязательные переменные
@@ -58,13 +58,13 @@ function addToHistory(userId, role, content) {
 //─────────────────────────────────────────────────────────────────────────────
 // 7) Обработка текстовых сообщений → GPT-4
 bot.on('text', async (ctx) => {
-  const uid = String(ctx.from.id);
-  const text = ctx.message.text;
+  const uid   = String(ctx.from.id);
+  const text  = ctx.message.text;
   addToHistory(uid, 'user', text);
 
   try {
     const resp = await openai.chat.completions.create({
-      model: 'gpt-4',
+      model: 'gpt-4',               // ← добавили model
       messages: chatHistory[uid],
     });
     const reply = resp.choices[0].message.content;
@@ -89,8 +89,8 @@ bot.on('voice', async (ctx) => {
     const link   = await ctx.telegram.getFileLink(fileId);
     const ogg    = `/tmp/${fileId}.ogg`;
     const wav    = `/tmp/${fileId}.wav`;
-    const res    = await fetch(link.href);
-    fs.writeFileSync(ogg, Buffer.from(await res.arrayBuffer()));
+    const fetchRes = await fetch(link.href);
+    fs.writeFileSync(ogg, Buffer.from(await fetchRes.arrayBuffer()));
 
     // 8.2 Конвертируем в wav
     await new Promise((resol, rej) =>
@@ -99,7 +99,7 @@ bot.on('voice', async (ctx) => {
 
     // 8.3 Транскрибируем Whisper
     const transcription = await openai.audio.transcriptions.create({
-      model: 'whisper-1',
+      model: 'whisper-1',           // ← добавили model
       file: fs.createReadStream(wav),
       response_format: 'text',
       language: process.env.LANGUAGE || 'ru',
@@ -109,7 +109,7 @@ bot.on('voice', async (ctx) => {
 
     // 8.4 Шлём в GPT-4
     const resp = await openai.chat.completions.create({
-      model: 'gpt-4',
+      model: 'gpt-4',               // ← добавили model
       messages: chatHistory[uid],
     });
     const reply = resp.choices[0].message.content;
@@ -133,7 +133,7 @@ bot.on('photo', async (ctx) => {
 
   try {
     const resp = await openai.chat.completions.create({
-      model: process.env.GPT_IMAGE_MODEL || 'gpt-4o',
+      model: process.env.GPT_IMAGE_MODEL || 'gpt-4o',  // ← model тоже
       messages: [
         BASE_SYSTEM,
         {
@@ -164,24 +164,24 @@ bot.on('document', async (ctx) => {
 
   try {
     // скачиваем
-    const r = await fetch(link.href);
-    fs.writeFileSync(tmp, Buffer.from(await r.arrayBuffer()));
+    const fetchRes = await fetch(link.href);
+    fs.writeFileSync(tmp, Buffer.from(await fetchRes.arrayBuffer()));
 
     // извлекаем текст
     let text = '';
     if (doc.mime_type === 'application/pdf') {
       const data = fs.readFileSync(tmp);
-      const pdf = await pdfParse(data);
-      text = pdf.text;
+      const pdf  = await pdfParse(data);
+      text       = pdf.text;
     } else {
       const res = await mammoth.extractRawText({ path: tmp });
-      text = res.value;
+      text       = res.value;
     }
 
     // шлём первые 2000 символов в GPT-4
     addToHistory(uid, 'user', text.slice(0, 2000));
     const resp = await openai.chat.completions.create({
-      model: 'gpt-4',
+      model: 'gpt-4',               // ← model
       messages: chatHistory[uid],
     });
     const out = resp.choices[0].message.content;
