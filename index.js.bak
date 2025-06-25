@@ -1,0 +1,179 @@
+// index.js
+//--------------------------------------------------------
+// 1) Подгружаем переменные окружения из .env
+require('dotenv').config({ path: __dirname + '/.env' });
+console.log('🔑 TELEGRAM_BOT_TOKEN =', process.env.TELEGRAM_BOT_TOKEN?.substring(0,8) + '…');
+console.log('🔑 OPENAI_API_KEY    =', process.env.OPENAI_API_KEY   ?.substring(0,8) + '…');
+
+// 2) Импорты и полифилл fetch
+const { Telegraf } = require('telegraf');
+const { exec } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+global.fetch = (...args) =>
+  import('node-fetch').then(({ default: fetch }) => fetch(...args));
+
+const { OpenAI } = require('openai');
+const pdfParse = require('pdf-parse');
+const textract = require('textract');
+const mammoth = require('mammoth');
+
+// 3) Проверяем обязательные переменные
+if (!process.env.TELEGRAM_BOT_TOKEN) {
+  console.error('❌ TELEGRAM_BOT_TOKEN не задан в .env');
+  process.exit(1);
+}
+if (!process.env.OPENAI_API_KEY) {
+  console.error('❌ OPENAI_API_KEY не задан в .env');
+  process.exit(1);
+}
+
+// 4) Инициализируем бота и OpenAI
+const bot    = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// —————————————————————————————————————————————
+const BASE_SYSTEM = {
+  role: 'system',
+  content:
+    'Ты — помощник, описывающий содержимое изображений. ' +
+    'Не называй людей по лицам и не разглашай личные данные.'
+};
+// —————————————————————————————————————————————
+
+// 5) Работа с историей переписки
+const HISTORY_PATH = path.join(__dirname, 'history.json');
+let chatHistory = {};
+try {
+  chatHistory = JSON.parse(fs.readFileSync(HISTORY_PATH, 'utf-8'));
+} catch {
+  console.log('ℹ️ history.json не найден — будет создан при первом сообщении');
+}
+
+function addToHistory(userId, role, content) {
+  if (!chatHistory[userId]) chatHistory[userId] = [];
+  chatHistory[userId].push({ role, content });
+  // сохраняем только последние 20 сообщений
+  if (chatHistory[userId].length > 20)
+    chatHistory[userId] = chatHistory[userId].slice(-20);
+  fs.writeFileSync(HISTORY_PATH, JSON.stringify(chatHistory, null, 2));
+}
+
+// 6) Текстовые сообщения
+bot.on('text', async (ctx) => {
+  const userId = String(ctx.from.id);
+  const text = ctx.message.text;
+  addToHistory(userId, 'user', text);
+
+  try {
+    const resp = await openai.chat.completions.create({
+      model: 'gpt-4',
+      messages: chatHistory[userId],
+    });
+    const reply = resp.choices[0].message.content;
+    await ctx.reply(reply);
+    addToHistory(userId, 'assistant', reply);
+  } catch (err) {
+    console.error('❌ GPT error:', err);
+    await ctx.reply('Ошибка GPT: ' + err.message);
+  }
+});
+
+// 7) Голосовые сообщения → Whisper → GPT-4
+bot.on('voice', async (ctx) => {
+  if (process.env.VOICE_TO_TEXT_ENABLED !== 'true') return;
+  const userId = String(ctx.from.id);
+
+  try {
+    // 7.1. Скачиваем ogg
+    const fileId = ctx.message.voice.file_id;
+    const link = await ctx.telegram.getFileLink(fileId);
+    const ogg = `/tmp/${fileId}.ogg`;
+    const wav = `/tmp/${fileId}.wav`;
+    const res = await fetch(link.href);
+    const buf = await res.arrayBuffer();
+    fs.writeFileSync(ogg, Buffer.from(buf));
+
+    // 7.2. Конвертируем в wav
+    await new Promise((r, e) =>
+      exec(`ffmpeg -i ${ogg} -ar 16000 -ac 1 ${wav}`, (err) =>
+        err ? e(err) : r()
+      )
+    );
+
+    // 7.3. Транскрибируем Whisper
+    const transcription = await openai.audio.transcriptions.create({
+      file: fs.createReadStream(wav),
+      model: 'whisper-1',
+      response_format: 'text',
+      language: process.env.LANGUAGE || 'ru',
+    });
+    const userText = transcription.trim();
+    addToHistory(userId, 'user', userText);
+
+    // 7.4. Шлём в GPT-4
+    const resp = await openai.chat.completions.create({
+      model: 'gpt-4',
+      messages: chatHistory[userId],
+    });
+    const reply = resp.choices[0].message.content;
+    await ctx.reply(reply);
+    addToHistory(userId, 'assistant', reply);
+
+  } catch (err) {
+    console.error('❌ Voice error:', err);
+    await ctx.reply('Ошибка голоса: ' + err.message);
+  }
+});
+
+// 8) Обработка фотографий через GPT-4o Vision
+bot.on('photo', async (ctx) => {
+  const photos = ctx.message.photo;
+  const fileId = photos[photos.length - 1].file_id;
+  const file    = await ctx.telegram.getFile(fileId);
+  const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+
+  try {
+    const resp = await openai.chat.completions.create({
+      model: process.env.GPT_IMAGE_MODEL || 'gpt-4o',
+      messages: [
+        BASE_SYSTEM,
+        {
+          role: 'user',
+          content: [
+            { type: 'text',      text: 'Опиши, пожалуйста, что изображено на этом фото.' },
+            { type: 'image_url', image_url: { url: fileUrl } }
+          ]
+        }
+      ],
+      max_tokens: 1000
+    });
+
+    await ctx.reply(resp.choices[0].message.content);
+  } catch (err) {
+    console.error('❌ Image error:', err);
+    await ctx.reply('Произошла ошибка при обработке изображения.');
+  }
+});
+
+(async () => {
+  // 1) Удаляем webhook, если был
+  try {
+    await bot.telegram.deleteWebhook();
+    console.log('ℹ Webhook удалён');
+  } catch (e) {
+    console.warn('⚠ Не удалось удалить webhook (игнорируем):', e.description || e.message);
+  }
+
+  // 2) Запускаем polling и сразу сбрасываем все старые апдейты
+  try {
+    await bot.launch({ dropPendingUpdates: true });
+    console.log('✅ Бот запущен (Polling, pending updates сброшены)');
+  } catch (e) {
+    console.error('❌ Launch error:', e);
+    process.exit(1);
+  }
+})();
+
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));

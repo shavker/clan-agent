@@ -1,0 +1,33 @@
+name: PM2 Log Watcher
+
+# Запускать по расписанию (каждые 5 минут),
+# а также на пуш в ветки fix-*
+on:
+  schedule:
+    - cron:  '*/5 * * * *'
+  push:
+    branches:
+      - 'fix/**'
+
+jobs:
+  watch-logs:
+    # здесь — наш self-hosted runner
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Tail last 20 lines of PM2 error log
+        run: |
+          pm2 logs clan-agent --lines 20 --error > tail.log || true
+          cat tail.log
+
+      - name: Fail if “you must provide a model parameter” найдено
+        run: |
+          if grep -q "you must provide a model parameter" tail.log; then
+            echo "::error ::Found missing model param in logs, please fix index.js"
+            exit 1
+          else
+            echo "Logs are clean ✅"
+          fi

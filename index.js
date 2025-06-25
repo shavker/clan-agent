@@ -31,7 +31,7 @@ const bot    = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 //─────────────────────────────────────────────────────────────────────────────
-// 5) Опционально: системное сообщение (для фото)
+// 5) Системное сообщение для описания изображений
 const BASE_SYSTEM = {
   role: 'system',
   content: 'Ты — помощник, описывающий содержание изображений. ' +
@@ -56,21 +56,20 @@ function addToHistory(userId, role, content) {
 }
 
 //─────────────────────────────────────────────────────────────────────────────
-// 7) Обработка текстовых сообщений → GPT-4
+// 7) TEXT → GPT-4
 bot.on('text', async (ctx) => {
-  const uid   = String(ctx.from.id);
-  const text  = ctx.message.text;
+  const uid = String(ctx.from.id);
+  const text = ctx.message.text;
   addToHistory(uid, 'user', text);
 
   try {
     const resp = await openai.chat.completions.create({
-      model: 'gpt-4',               // ← добавили model
-      messages: chatHistory[uid],
+      model: 'gpt-4',
+      messages: chatHistory[uid]
     });
     const reply = resp.choices[0].message.content;
     await ctx.reply(reply);
     addToHistory(uid, 'assistant', reply);
-
   } catch (err) {
     console.error('❌ GPT error:', err);
     await ctx.reply('Ошибка GPT: ' + err.message);
@@ -78,44 +77,43 @@ bot.on('text', async (ctx) => {
 });
 
 //─────────────────────────────────────────────────────────────────────────────
-// 8) Обработка голосовых сообщений → Whisper → GPT-4
+// 8) VOICE → Whisper → GPT-4
 bot.on('voice', async (ctx) => {
   if (process.env.VOICE_TO_TEXT_ENABLED !== 'true') return;
   const uid = String(ctx.from.id);
 
   try {
-    // 8.1 Скачиваем ogg
+    // скачиваем ogg
     const fileId = ctx.message.voice.file_id;
     const link   = await ctx.telegram.getFileLink(fileId);
     const ogg    = `/tmp/${fileId}.ogg`;
     const wav    = `/tmp/${fileId}.wav`;
-    const fetchRes = await fetch(link.href);
-    fs.writeFileSync(ogg, Buffer.from(await fetchRes.arrayBuffer()));
+    const res    = await fetch(link.href);
+    fs.writeFileSync(ogg, Buffer.from(await res.arrayBuffer()));
 
-    // 8.2 Конвертируем в wav
-    await new Promise((resol, rej) =>
-      exec(`ffmpeg -i ${ogg} -ar 16000 -ac 1 ${wav}`, (e) => e ? rej(e) : resol())
+    // в wav
+    await new Promise((r, e) =>
+      exec(`ffmpeg -i ${ogg} -ar 16000 -ac 1 ${wav}`, (err) => err ? e(err) : r())
     );
 
-    // 8.3 Транскрибируем Whisper
+    // транскрипция
     const transcription = await openai.audio.transcriptions.create({
-      model: 'whisper-1',           // ← добавили model
+      model: 'whisper-1',
       file: fs.createReadStream(wav),
       response_format: 'text',
-      language: process.env.LANGUAGE || 'ru',
+      language: process.env.LANGUAGE || 'ru'
     });
     const userText = transcription.trim();
     addToHistory(uid, 'user', userText);
 
-    // 8.4 Шлём в GPT-4
-    const resp = await openai.chat.completions.create({
-      model: 'gpt-4',               // ← добавили model
-      messages: chatHistory[uid],
+    // шлём в GPT-4
+    const chat = await openai.chat.completions.create({
+      model: 'gpt-4',
+      messages: chatHistory[uid]
     });
-    const reply = resp.choices[0].message.content;
+    const reply = chat.choices[0].message.content;
     await ctx.reply(reply);
     addToHistory(uid, 'assistant', reply);
-
   } catch (err) {
     console.error('❌ Voice error:', err);
     await ctx.reply('Ошибка голоса: ' + err.message);
@@ -123,7 +121,7 @@ bot.on('voice', async (ctx) => {
 });
 
 //─────────────────────────────────────────────────────────────────────────────
-// 9) Обработка фотографий → GPT-4o Vision
+// 9) PHOTO → GPT-4o Vision
 bot.on('photo', async (ctx) => {
   const uid    = String(ctx.from.id);
   const photos = ctx.message.photo;
@@ -133,7 +131,7 @@ bot.on('photo', async (ctx) => {
 
   try {
     const resp = await openai.chat.completions.create({
-      model: process.env.GPT_IMAGE_MODEL || 'gpt-4o',  // ← model тоже
+      model: process.env.GPT_IMAGE_MODEL || 'gpt-4o',
       messages: [
         BASE_SYSTEM,
         {
@@ -144,10 +142,9 @@ bot.on('photo', async (ctx) => {
           ]
         }
       ],
-      max_tokens: 1000,
+      max_tokens: 1000
     });
     await ctx.reply(resp.choices[0].message.content);
-
   } catch (err) {
     console.error('❌ Image error:', err);
     await ctx.reply('Ошибка изображения: ' + err.message);
@@ -155,7 +152,7 @@ bot.on('photo', async (ctx) => {
 });
 
 //─────────────────────────────────────────────────────────────────────────────
-// 10) Обработка документов PDF/DOCX → GPT-4
+// 10) DOCUMENT (PDF/DOCX) → GPT-4
 bot.on('document', async (ctx) => {
   const uid  = String(ctx.from.id);
   const doc  = ctx.message.document;
@@ -164,30 +161,26 @@ bot.on('document', async (ctx) => {
 
   try {
     // скачиваем
-    const fetchRes = await fetch(link.href);
-    fs.writeFileSync(tmp, Buffer.from(await fetchRes.arrayBuffer()));
+    const r = await fetch(link.href);
+    fs.writeFileSync(tmp, Buffer.from(await r.arrayBuffer()));
 
-    // извлекаем текст
+    // текст
     let text = '';
     if (doc.mime_type === 'application/pdf') {
-      const data = fs.readFileSync(tmp);
-      const pdf  = await pdfParse(data);
-      text       = pdf.text;
+      const pdf = await pdfParse(fs.readFileSync(tmp));
+      text = pdf.text;
     } else {
-      const res = await mammoth.extractRawText({ path: tmp });
-      text       = res.value;
+      text = (await mammoth.extractRawText({ path: tmp })).value;
     }
 
-    // шлём первые 2000 символов в GPT-4
     addToHistory(uid, 'user', text.slice(0, 2000));
     const resp = await openai.chat.completions.create({
-      model: 'gpt-4',               // ← model
-      messages: chatHistory[uid],
+      model: 'gpt-4',
+      messages: chatHistory[uid]
     });
     const out = resp.choices[0].message.content;
     await ctx.reply(out);
     addToHistory(uid, 'assistant', out);
-
   } catch (err) {
     console.error('❌ Doc error:', err);
     await ctx.reply('Ошибка документа: ' + err.message);
@@ -195,12 +188,11 @@ bot.on('document', async (ctx) => {
 });
 
 //─────────────────────────────────────────────────────────────────────────────
-// 11) Удаляем старый webhook и запускаем polling
+// 11) Запуск polling
 ;(async () => {
   try {
     await bot.telegram.deleteWebhook().catch(() => {});
     console.log('ℹ️ Webhook удалён');
-
     await bot.launch({ dropPendingUpdates: true });
     console.log('✅ Бот запущен (Polling, pending updates сброшены)');
   } catch (err) {
@@ -209,6 +201,5 @@ bot.on('document', async (ctx) => {
   }
 })();
 
-// graceful shutdown
 process.once('SIGINT',  () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
