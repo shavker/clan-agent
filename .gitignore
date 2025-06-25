@@ -1,0 +1,23 @@
+# Node.js зависимости
+node_modules/
+
+# Переменные окружения
+.env
+
+# Логи и история переписки
+history.json
+
+# Временные файлы
+/tmp/
+
+# Транскрипты Whisper, субтитры и буферы
+*.json
+!package.json
+!package-lock.json
+*.txt
+*.srt
+*.tsv
+*.vtt
+
+# Логи PM2 и служебные папки
+.pm2/
